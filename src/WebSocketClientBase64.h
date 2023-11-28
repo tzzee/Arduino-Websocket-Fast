@@ -1,5 +1,5 @@
-#ifndef _BASE64_H
-#define _BASE64_H
+#ifndef WEBSOCKETCLIENT_BASE64_H_
+#define WEBSOCKETCLIENT_BASE64_H_
 
 /* b64_alphabet:
  * 		Description: Base64 alphabet table, a mapping between integers
@@ -72,4 +72,4 @@ int base64_enc_len(int inputLen);
  */
 int base64_dec_len(char *input, int inputLen);
 
-#endif // _BASE64_H
+#endif // WEBSOCKETCLIENT_BASE64_H_

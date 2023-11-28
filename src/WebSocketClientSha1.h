@@ -1,5 +1,5 @@
-#ifndef Sha1_h
-#define Sha1_h
+#ifndef WEBSOCKETCLIENT_SHA1_H_
+#define WEBSOCKETCLIENT_SHA1_H_
 
 #include <inttypes.h>
 #include "Print.h"

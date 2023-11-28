@@ -3,8 +3,8 @@
 #include "global.h"
 #include "WebSocketClient.h"
 
-#include "sha1.h"
-#include "base64.h"
+#include "WebSocketClientSha1.h"
+#include "WebSocketClientBase64.h"
 
 
 bool WebSocketClient::handshake(Client &client, bool socketio) {
