@@ -62,7 +62,9 @@ bool WebSocketClient::analyzeRequest() {
     Serial.println(F("Sending websocket upgrade headers"));
 #endif
 
+#ifndef ARDUINO_ARCH_ESP32
         randomSeed(analogRead(0));
+#endif
 
         for (int i=0; i<16; ++i) {
             keyStart[i] = (char)random(1, 256);
