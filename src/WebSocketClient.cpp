@@ -258,6 +258,9 @@ WS_SIZE_T WebSocketClient::handleStream() {
                 // the negotiated extensions defines the meaning of such a nonzero
                 // value, the receiving endpoint MUST _Fail the WebSocket
                 // Connection_.
+                sendData((const char*)WS_CLOSE_BAD_REQUEST, sizeof(WS_CLOSE_BAD_REQUEST)-1, WS_OPCODE_CLOSE);
+                socket_client->stop();
+                return -1;
             } else {
                 receivingFrame.frame.fin = ((finOpcode & WS_FIN) != 0);
                 receivingFrame.frame.opcode = finOpcode&(~WS_FIN);
@@ -272,6 +275,9 @@ WS_SIZE_T WebSocketClient::handleStream() {
                     log_v("opcode: %d %x", receivingFrame.frame.fin, receivingFrame.frame.opcode);
                     break;
                 default:
+                    sendData((const char*)WS_CLOSE_UNSUPPORTED, sizeof(WS_CLOSE_UNSUPPORTED)-1, WS_OPCODE_CLOSE);
+                    socket_client->stop();
+                    return -1;
                     // If an unknown
                     // opcode is received, the receiving endpoint MUST _Fail the
                     // WebSocket Connection_.

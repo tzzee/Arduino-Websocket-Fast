@@ -87,6 +87,10 @@ http://tools.ietf.org/html/draft-hixie-thewebsocketprotocol-75
 #define WS_SIZE16         126
 #define WS_SIZE64         127
 
+
+#define WS_CLOSE_UNSUPPORTED "Unsupported WebSocket opcode"
+#define WS_CLOSE_BAD_REQUEST "Bad Request"
+
 typedef std::size_t WS_SIZE_T;
 
 class WebSocketClient {
