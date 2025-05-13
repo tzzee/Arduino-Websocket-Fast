@@ -74,6 +74,8 @@ http://tools.ietf.org/html/draft-hixie-thewebsocketprotocol-75
 // WebSocket protocol constants
 // First byte
 #define WS_FIN            0x80
+#define WS_RSV            0b01110000
+#define WS_OPCODE_CONT    0x00
 #define WS_OPCODE_TEXT    0x01
 #define WS_OPCODE_BINARY  0x02
 #define WS_OPCODE_CLOSE   0x08
@@ -85,21 +87,26 @@ http://tools.ietf.org/html/draft-hixie-thewebsocketprotocol-75
 #define WS_SIZE16         126
 #define WS_SIZE64         127
 
+typedef std::size_t WS_SIZE_T;
 
 class WebSocketClient {
 public:
 
     // Handle connection requests to validate and process/refuse
     // connections.
-    bool handshake(Client &client, bool socketio = false);
+    bool handshake(Client &client, bool socketio = false, std::uint32_t timeoutMsec=10000);
 
     // Get data off of the stream
+    std::size_t getData(char *data, std::size_t capacity, uint8_t *opcode = NULL);
     bool getData(String& data, uint8_t *opcode = NULL);
-    bool getData(char *data, uint8_t *opcode = NULL);
 
     // Write data to the stream
-    void sendData(const char *str, uint8_t opcode = WS_OPCODE_TEXT, bool fast = true);
-    void sendData(String str, uint8_t opcode = WS_OPCODE_TEXT, bool fast = true);
+    std::size_t sendData(const char *str, std::size_t size, uint8_t opcode);
+    std::size_t sendData(const String& str, uint8_t opcode) {
+        return sendData(str.c_str(), str.length(), opcode);
+    }
+
+    WS_SIZE_T handleStream();
 
     bool issocketio;
     char *path;
@@ -110,27 +117,38 @@ private:
     Client *socket_client;
     // socket.io session id
     char sid[32];
-    unsigned long _startMillis;
+
+
+    struct Frame{
+        bool fin;
+        uint8_t opcode;
+        WS_SIZE_T length;
+        uint8_t mask[4];
+        bool hasMask;
+    };
+    enum FrameNextState {
+        WS_FRAME_OPCODE,
+        WS_FRAME_LENGTH_8,
+        WS_FRAME_LENGTH_16,
+        WS_FRAME_LENGTH_64,
+        WS_FRAME_MASK,
+        WS_FRAME_PAYLOAD,  
+    };
+    struct ReceivingFrame{
+        FrameNextState state;
+        Frame frame;
+        WS_SIZE_T index;
+        unsigned long _startMillis;
+    } receivingFrame;
 
     const char *socket_urlPrefix;
 
     // Discovers if the client's header is requesting an upgrade to a
     // websocket connection.
-    bool analyzeRequest();
-
-    bool handleStream(String& data, uint8_t *opcode);
-    bool handleStream(char *data, uint8_t *opcode);
+    bool analyzeRequest(std::uint32_t timeoutMsec);
 
     // Disconnect user gracefully.
     void disconnectStream();
-
-    int timedRead();
-
-    void sendEncodedData(char *str, uint8_t opcode);
-    void sendEncodedData(String str, uint8_t opcode);
-
-    void sendEncodedDataFast(char *str, uint8_t opcode);
-    void sendEncodedDataFast(String str, uint8_t opcode);
 };
 
 

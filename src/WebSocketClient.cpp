@@ -7,7 +7,7 @@
 #include "WebSocketClientBase64.h"
 
 
-bool WebSocketClient::handshake(Client &client, bool socketio) {
+bool WebSocketClient::handshake(Client &client, bool socketio, std::uint32_t timeoutMsec) {
 
     socket_client = &client;
     issocketio = socketio;
@@ -20,10 +20,10 @@ bool WebSocketClient::handshake(Client &client, bool socketio) {
             Serial.println(F("Client connected"));
 #endif
         if (issocketio && strlen(sid) == 0) {
-            analyzeRequest();
+            analyzeRequest(timeoutMsec);
         }
 
-        if (analyzeRequest()) {
+        if (analyzeRequest(timeoutMsec)) {
 #ifdef DEBUGGING
                 Serial.println(F("Websocket established"));
 #endif
@@ -44,8 +44,8 @@ bool WebSocketClient::handshake(Client &client, bool socketio) {
     }
 }
 
-bool WebSocketClient::analyzeRequest() {
-    String temp;
+bool WebSocketClient::analyzeRequest(std::uint32_t timeoutMsec) {
+    String temp = "";
 
     int bite;
     bool foundupgrade = false;
@@ -55,6 +55,8 @@ bool WebSocketClient::analyzeRequest() {
     char keyStart[17];
     char b64Key[25];
     String key = "------------------------";
+
+    uint32_t recvMillis = millis();
 
     if (!issocketio || (issocketio && strlen(sid) > 0)) {
 
@@ -135,17 +137,48 @@ bool WebSocketClient::analyzeRequest() {
     Serial.println(F("Analyzing response headers"));
 #endif
 
-    while (socket_client->connected() && !socket_client->available()) {
+    recvMillis = millis();
+
+    Serial.print(F("Waiting"));
+    while (!socket_client->available()) {
+        if (!socket_client->connected()) {
+            Serial.println();
+            Serial.println("Connection diffused");
+            return false;
+        } else if ((millis() - recvMillis) > timeoutMsec) {
+            socket_client->stop();
+            Serial.println();
+            Serial.println("Connection timeout");
+            return false;
+        }
         delay(100);
-        Serial.println("Waiting...");
+        Serial.print(".");
     }
+    Serial.println();
 
-    // TODO: More robust string extraction
-    while ((bite = socket_client->read()) != -1) {
+    recvMillis = millis();
 
+    while (true) {
+        while((bite = socket_client->read()) == -1) {
+            if (!socket_client->connected()) {
+                Serial.println("Connection diffused");
+                return false;
+            } else if ((millis() - recvMillis) > socket_client->getTimeout()) {
+                socket_client->stop();
+                Serial.printf("Read timeout %lu\n", socket_client->getTimeout());
+                return false;
+            }
+            delay(20);
+        }
+        recvMillis = millis();
         temp += (char)bite;
 
         if ((char)bite == '\n') {
+            temp.trim();
+            if (temp.length()==0) {
+                // end of headers
+                break;
+            }
             String tempLC = temp;
             tempLC.toLowerCase(); // uses case-insensitive header string for parsing to ensure to catch response from servers using different upper/lowercase variants of headers
 #ifdef DEBUGGING
@@ -154,12 +187,12 @@ bool WebSocketClient::analyzeRequest() {
             if (!foundupgrade && tempLC.startsWith("upgrade: websocket")) {
                 foundupgrade = true;
             } else if (tempLC.startsWith("sec-websocket-accept: ")) {
-                serverKey = temp.substring(22,temp.length() - 2); // Don't save last CR+LF
+                serverKey = temp.substring(22);
             } else if (!foundsid && tempLC.startsWith("set-cookie: ")) {
                  foundsid = true;
                  String tempsid;
                  if (temp.indexOf(";") == -1){ // looks for ";" in cookie header, which indicates more than one cookie value
-                   tempsid = temp.substring(temp.indexOf("=") + 1, temp.length() - 2); // Don't save last CR+LF
+                   tempsid = temp.substring(temp.indexOf("=") + 1);
                  }
                  else {
                    tempsid = temp.substring(temp.indexOf("=") + 1, temp.indexOf(";")); // assumes sid is first cookie value, discards all other values
@@ -171,10 +204,6 @@ bool WebSocketClient::analyzeRequest() {
                 #endif
             }
             temp = "";
-        }
-
-        if (!socket_client->available()) {
-          delay(20);
         }
     }
 
@@ -202,207 +231,159 @@ bool WebSocketClient::analyzeRequest() {
     return serverKey.equals(String(b64Result));
 }
 
-
-bool WebSocketClient::handleStream(String& data, uint8_t *opcode) {
-    uint8_t msgtype;
-    uint8_t bite;
-    unsigned int length;
-    uint8_t mask[4];
-    uint8_t index;
-    unsigned int i;
-    bool hasMask = false;
-
-    if (!socket_client->connected() || !socket_client->available())
-    {
-        return false;
-    }
-
-    msgtype = timedRead();
-    if (!socket_client->connected()) {
-        return false;
-    }
-
-    length = timedRead();
-
-    if (length & WS_MASK) {
-        hasMask = true;
-        length = length & ~WS_MASK;
-    }
-
-
-    if (!socket_client->connected()) {
-        return false;
-    }
-
-    index = 6;
-
-    if (length == WS_SIZE16) {
-        length = timedRead() << 8;
-        if (!socket_client->connected()) {
-            return false;
-        }
-
-        length |= timedRead();
-        if (!socket_client->connected()) {
-            return false;
-        }
-
-    } else if (length == WS_SIZE64) {
-#ifdef DEBUGGING
-        Serial.println(F("No support for over 16 bit sized messages"));
-#endif
-        return false;
-    }
-
-    if (hasMask) {
-        // get the mask
-        mask[0] = timedRead();
-        if (!socket_client->connected()) {
-            return false;
-        }
-
-        mask[1] = timedRead();
-        if (!socket_client->connected()) {
-
-            return false;
-        }
-
-        mask[2] = timedRead();
-        if (!socket_client->connected()) {
-            return false;
-        }
-
-        mask[3] = timedRead();
-        if (!socket_client->connected()) {
-            return false;
+WS_SIZE_T WebSocketClient::handleStream() {
+    if (receivingFrame.state != WS_FRAME_OPCODE) {
+        if ((millis() - receivingFrame._startMillis) > socket_client->getTimeout()) {
+            // timeout
+            receivingFrame.state = WS_FRAME_OPCODE;
+            return -1;
         }
     }
-
-    data = "";
-
-    if (opcode != NULL)
-    {
-      *opcode = msgtype & ~WS_FIN;
+    if (!socket_client->connected() || !socket_client->available()){
+        return -1;
+    } else if (receivingFrame.state == WS_FRAME_PAYLOAD) {
+        return receivingFrame.frame.length-receivingFrame.index;
     }
-
-    if (hasMask) {
-        for (i=0; i<length; ++i) {
-            data += (char) (timedRead() ^ mask[i % 4]);
-            if (!socket_client->connected()) {
-                return false;
+    const int r = socket_client->read();
+    if (r < 0) {
+        return -1;
+    }
+    receivingFrame._startMillis = millis();
+    switch(receivingFrame.state) {
+        case WS_FRAME_OPCODE: {
+            const uint8_t finOpcode = r;
+            if ((finOpcode & WS_RSV) != 0) {
+                // MUST be 0 unless an extension is negotiated that defines meanings
+                // for non-zero values.  If a nonzero value is received and none of
+                // the negotiated extensions defines the meaning of such a nonzero
+                // value, the receiving endpoint MUST _Fail the WebSocket
+                // Connection_.
+            } else {
+                receivingFrame.frame.fin = ((finOpcode & WS_FIN) != 0);
+                receivingFrame.frame.opcode = finOpcode&(~WS_FIN);
+                switch (receivingFrame.frame.opcode) {
+                case WS_OPCODE_CONT:
+                case WS_OPCODE_TEXT:
+                case WS_OPCODE_BINARY:
+                case WS_OPCODE_CLOSE:
+                case WS_OPCODE_PING:
+                case WS_OPCODE_PONG:
+                    receivingFrame.state = WS_FRAME_LENGTH_8;
+                    log_v("opcode: %d %x", receivingFrame.frame.fin, receivingFrame.frame.opcode);
+                    break;
+                default:
+                    // If an unknown
+                    // opcode is received, the receiving endpoint MUST _Fail the
+                    // WebSocket Connection_.
+                    break;
+                }
+            }
+        } break;
+        case WS_FRAME_LENGTH_8: {
+            const uint8_t maskLen = r;
+            receivingFrame.frame.hasMask = (bool)(maskLen & WS_MASK);
+            const uint8_t len = maskLen & (~WS_MASK);
+            receivingFrame.index = 0;
+            if (len == WS_SIZE16) {
+                receivingFrame.frame.length = 0;
+                receivingFrame.state = WS_FRAME_LENGTH_16;
+            } else if (len == WS_SIZE64) {
+                receivingFrame.frame.length = 0;
+                receivingFrame.state = WS_FRAME_LENGTH_64;
+            } else {
+                receivingFrame.frame.length = (WS_SIZE_T)len;
+                if (receivingFrame.frame.hasMask) {
+                    receivingFrame.state = WS_FRAME_MASK;
+                } else {
+                    receivingFrame.state = WS_FRAME_PAYLOAD;
+                }
+                log_v("length8: %d %u", receivingFrame.frame.hasMask, receivingFrame.frame.length);
+            }
+        } break;
+        case WS_FRAME_LENGTH_16: {
+            receivingFrame.frame.length = (receivingFrame.frame.length<<8 | (WS_SIZE_T)r);
+            receivingFrame.index++;
+            if (receivingFrame.index == 2) {
+                receivingFrame.index = 0;
+                if (receivingFrame.frame.hasMask) {
+                    receivingFrame.state = WS_FRAME_MASK;
+                } else {
+                    receivingFrame.state = WS_FRAME_PAYLOAD;
+                }
+                log_v("length16: %d %u", receivingFrame.frame.hasMask, receivingFrame.frame.length);
+            }
+        } break;
+        case WS_FRAME_LENGTH_64: {
+            receivingFrame.frame.length = (receivingFrame.frame.length<<8 | (WS_SIZE_T)r);
+            receivingFrame.index++;
+            if (receivingFrame.index == 8) {
+                receivingFrame.index = 0;
+                if (receivingFrame.frame.hasMask) {
+                    receivingFrame.state = WS_FRAME_MASK;
+                } else {
+                    receivingFrame.state = WS_FRAME_PAYLOAD;
+                }
+                log_v("length64: %d %u", receivingFrame.frame.hasMask, receivingFrame.frame.length);
+            }
+        } break;
+        case WS_FRAME_MASK: {
+            receivingFrame.frame.mask[receivingFrame.index++] = r;
+            if (receivingFrame.index == 4) {
+                receivingFrame.index = 0;
+                receivingFrame.state = WS_FRAME_PAYLOAD;
+                log_v("mask: %02x %02x %02x %02x", receivingFrame.frame.mask[0], receivingFrame.frame.mask[1], receivingFrame.frame.mask[2], receivingFrame.frame.mask[3]);
             }
         }
-    } else {
-        for (i=0; i<length; ++i) {
-            data += (char) timedRead();
-            if (!socket_client->connected()) {
-                return false;
-            }
-        }
     }
-
-    return true;
+    return -2;
 }
 
-bool WebSocketClient::handleStream(char *data, uint8_t *opcode) {
-    uint8_t msgtype;
-    uint8_t bite;
-    unsigned int length;
-    uint8_t mask[4];
-    uint8_t index;
-    unsigned int i;
-    bool hasMask = false;
-
-    if (!socket_client->connected() || !socket_client->available())
-    {
-        return false;
+bool WebSocketClient::getData(String& str, uint8_t *opcode) {
+    const WS_SIZE_T remain = handleStream();
+    if (remain == -2) {
+      return false;
+    } else if (0 <= remain) {
+      char data[remain];
+      const std::size_t len = getData(data, (std::size_t)remain, opcode);
+      str += data;
+      return len == remain;
     }
+    return false;
+}
 
-    msgtype = timedRead();
-    if (!socket_client->connected()) {
-        return false;
-    }
-
-    length = timedRead();
-
-    if (length & WS_MASK) {
-        hasMask = true;
-        length = length & ~WS_MASK;
-    }
-
-
-    if (!socket_client->connected()) {
-        return false;
-    }
-
-    index = 6;
-
-    if (length == WS_SIZE16) {
-        length = timedRead() << 8;
-        if (!socket_client->connected()) {
-            return false;
+std::size_t WebSocketClient::getData(char *data, std::size_t length, uint8_t *opcode) {
+    if (!data || receivingFrame.state != WS_FRAME_PAYLOAD) {
+        const WS_SIZE_T remain = handleStream();
+        if (remain < 0) {
+            return 0;
+        } else if (!data) {
+            return remain;
+        } else if (receivingFrame.state != WS_FRAME_PAYLOAD) {
+            return 0;
         }
-
-        length |= timedRead();
-        if (!socket_client->connected()) {
-            return false;
-        }
-
-    } else if (length == WS_SIZE64) {
-#ifdef DEBUGGING
-        Serial.println(F("No support for over 16 bit sized messages"));
-#endif
-        return false;
+    } else if (!socket_client->connected() || !socket_client->available()){
+        return 0;
     }
-
-    if (hasMask) {
-        // get the mask
-        mask[0] = timedRead();
-        if (!socket_client->connected()) {
-            return false;
-        }
-
-        mask[1] = timedRead();
-        if (!socket_client->connected()) {
-
-            return false;
-        }
-
-        mask[2] = timedRead();
-        if (!socket_client->connected()) {
-            return false;
-        }
-
-        mask[3] = timedRead();
-        if (!socket_client->connected()) {
-            return false;
-        }
+    if (opcode != NULL) {
+        *opcode = receivingFrame.frame.opcode;
     }
-
-    strcpy(data, "");
-
-    if (opcode != NULL)
-    {
-      *opcode = msgtype & ~WS_FIN;
-    }
-
-    if (hasMask) {
-        for (i=0; i<length; ++i) {
-            sprintf(data, "%s%c", data, (char) (timedRead() ^ mask[i % 4]));
-            if (!socket_client->connected()) {
-                return false;
-            }
+    const std::size_t len = socket_client->readBytes(data, length);
+    if (receivingFrame.frame.hasMask) {
+        // unmask the data
+        for (int i=0; i<std::min(len, length); ++i) {
+            data[i] = data[i] ^ receivingFrame.frame.mask[(receivingFrame.index++) % 4];
         }
     } else {
-        for (i=0; i<length; ++i) {
-            sprintf(data, "%s%c", data, (char) timedRead());
-            if (!socket_client->connected()) {
-                return false;
-            }
-        }
+        // no mask
+        receivingFrame.index += len;
     }
-
-    return true;
+    log_v("data: %d %u %u %d", receivingFrame.frame.opcode, receivingFrame.frame.length, receivingFrame.index, len);
+    if (receivingFrame.frame.length == receivingFrame.index) {
+        // end
+        receivingFrame.state = WS_FRAME_OPCODE;
+    }
+    receivingFrame._startMillis = millis();
+    return length;
 }
 
 void WebSocketClient::disconnectStream() {
@@ -419,163 +400,58 @@ void WebSocketClient::disconnectStream() {
     strcpy(sid, "");
 }
 
-bool WebSocketClient::getData(String& data, uint8_t *opcode) {
-    return handleStream(data, opcode);
-}
-
-bool WebSocketClient::getData(char *data, uint8_t *opcode) {
-    return handleStream(data, opcode);
-}
-
-void WebSocketClient::sendData(const char *str, uint8_t opcode, bool fast) {
+std::size_t WebSocketClient::sendData(const char *str, std::size_t size, uint8_t opcode) {
 #ifdef DEBUGGING
     Serial.print(F("Sending data: "));
     Serial.println(str);
 #endif
     if (socket_client->connected()) {
-        if (fast) {
-            sendEncodedDataFast(str, opcode);
+        uint8_t mask[4];
+        int size_buf = size + 1;
+        if (size > 125) {
+            size_buf += 3;
         } else {
-            sendEncodedData(str, opcode);
+            size_buf += 1;
         }
-    }
-}
-
-void WebSocketClient::sendData(String str, uint8_t opcode, bool fast) {
-#ifdef DEBUGGING
-    Serial.print(F("Sending data: "));
-    Serial.println(str);
-#endif
-    if (socket_client->connected()) {
-        if (fast) {
-            sendEncodedDataFast(str, opcode);
-        } else {
-            sendEncodedData(str, opcode);
-        }
-    }
-}
-
-int WebSocketClient::timedRead() {
-  while (!socket_client->available()) {
-    //delay(20);
-  }
-
-  return socket_client->read();
-}
-
-void WebSocketClient::sendEncodedData(char *str, uint8_t opcode) {
-    uint8_t mask[4];
-    int size = strlen(str);
-
-    // Opcode; final fragment
-    socket_client->write(opcode | WS_FIN);
-
-    // NOTE: no support for > 16-bit sized messages
-    if (size > 125) {
-        socket_client->write(WS_SIZE16 | WS_MASK);
-        socket_client->write((uint8_t) (size >> 8));
-        socket_client->write((uint8_t) (size & 0xFF));
-    } else {
-        socket_client->write((uint8_t) size | WS_MASK);
-    }
-
-    if (WS_MASK > 0) {
-        //Serial.println("MASK");
-        mask[0] = random(0, 256);
-        mask[1] = random(0, 256);
-        mask[2] = random(0, 256);
-        mask[3] = random(0, 256);
-
-        socket_client->write(mask[0]);
-        socket_client->write(mask[1]);
-        socket_client->write(mask[2]);
-        socket_client->write(mask[3]);
-    }
-
-    for (int i=0; i<size; ++i) {
         if (WS_MASK > 0) {
-            //Serial.println("send with MASK");
-            //delay(20);
-            socket_client->write(str[i] ^ mask[i % 4]);
+            size_buf += 4;
+        }
+        char buf[size_buf];
+        char* p=buf;
+
+        // Opcode; final fragment
+        *p++ = (char)(opcode | WS_FIN);
+
+        // NOTE: no support for > 16-bit sized messages
+        if (size > 125) {
+            *p++ = (char) (WS_SIZE16 | WS_MASK);
+            *p++ = (char) (size >> 8);
+            *p++ = (char) (size & 0xFF);
         } else {
-            socket_client->write(str[i]);
+            *p++ = (char) (size | WS_MASK);
         }
-    }
-}
 
-void WebSocketClient::sendEncodedDataFast(char *str, uint8_t opcode) {
-    uint8_t mask[4];
-    int size = strlen(str);
-    int size_buf = size + 1;
-    if (size > 125) {
-        size_buf += 3;
-    } else {
-        size_buf += 1;
-    }
-    if (WS_MASK > 0) {
-        size_buf += 4;
-    }
+        if (WS_MASK > 0) {
+            mask[0] = random(0, 256);
+            mask[1] = random(0, 256);
+            mask[2] = random(0, 256);
+            mask[3] = random(0, 256);
 
-    char buf[size_buf];
-    char tmp[2];
+            *p++ = (char) mask[0];
+            *p++ = (char) mask[1];
+            *p++ = (char) mask[2];
+            *p++ = (char) mask[3];
 
-    // Opcode; final fragment
-    sprintf(tmp, "%c", (char)(opcode | WS_FIN));
-    strcpy(buf, tmp);
-
-    // NOTE: no support for > 16-bit sized messages
-    if (size > 125) {
-        sprintf(tmp, "%c", (char)(WS_SIZE16 | WS_MASK));
-        strcat(buf, tmp);
-        sprintf(tmp, "%c", (char) (size >> 8));
-        strcat(buf, tmp);
-        sprintf(tmp, "%c", (char) (size & 0xFF));
-        strcat(buf, tmp);
-    } else {
-        sprintf(tmp, "%c", (char) size | WS_MASK);
-        strcat(buf, tmp);
-    }
-
-    if (WS_MASK > 0) {
-        mask[0] = random(0, 256);
-        mask[1] = random(0, 256);
-        mask[2] = random(0, 256);
-        mask[3] = random(0, 256);
-
-        sprintf(tmp, "%c", (char) mask[0]);
-        strcat(buf, tmp);
-        sprintf(tmp, "%c", (char) mask[1]);
-        strcat(buf, tmp);
-        sprintf(tmp, "%c", (char) mask[2]);
-        strcat(buf, tmp);
-        sprintf(tmp, "%c", (char) mask[3]);
-        strcat(buf, tmp);
-
-        for (int i=0; i<size; ++i) {
-            str[i] = str[i] ^ mask[i % 4];
+            for (int i=0; i<size; ++i) {
+                *p++ = str[i] ^ mask[i % 4];
+            }
+        } else {
+            memcpy(p, str, size); p+=size;
         }
+        *p++ = '\0';
+
+        const std::size_t r = socket_client->write((uint8_t*)buf, size_buf);
+        return r;
     }
-
-    strcat(buf, str);
-    socket_client->write((uint8_t*)buf, size_buf);
-}
-
-
-void WebSocketClient::sendEncodedData(String str, uint8_t opcode) {
-    int size = str.length() + 1;
-    char cstr[size];
-
-    str.toCharArray(cstr, size);
-
-    sendEncodedData(cstr, opcode);
-}
-
-
-void WebSocketClient::sendEncodedDataFast(String str, uint8_t opcode) {
-    int size = str.length() + 1;
-    char cstr[size];
-
-    str.toCharArray(cstr, size);
-
-    sendEncodedDataFast(cstr, opcode);
+    return 0;
 }
